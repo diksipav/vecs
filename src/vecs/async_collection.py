@@ -1,7 +1,7 @@
 """
-Defines the 'Collection' class
+Defines the 'AsyncCollection' class
 
-Importing from the `vecs.collection` directly is not supported.
+Importing from the `vecs.async_collection` directly is not supported.
 All public classes, enums, and functions are re-exported by the top level `vecs` module.
 """
 
@@ -10,142 +10,49 @@ from __future__ import annotations
 import math
 import uuid
 import warnings
-from dataclasses import dataclass
-from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple, Union
 
 from flupy import flu
-from pgvector.sqlalchemy import Vector
-from sqlalchemy import (
-    Column,
-    MetaData,
-    String,
-    Table,
-    and_,
-    cast,
-    delete,
-    func,
-    or_,
-    select,
-    text,
-)
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.dialects import postgresql
 
 from vecs.adapter import Adapter, AdapterContext, NoOp
+from vecs.collection import (
+    INDEX_MEASURE_TO_OPS,
+    INDEX_MEASURE_TO_SQLA_ACC,
+    IndexArgsHNSW,
+    IndexArgsIVFFlat,
+    IndexMeasure,
+    IndexMethod,
+    Metadata,
+    Numeric,
+    Record,
+    build_filters,
+    build_table,
+)
 from vecs.exc import (
     ArgError,
     CollectionAlreadyExists,
     CollectionNotFound,
-    FilterError,
     MismatchedDimension,
-    Unreachable,
 )
 
 if TYPE_CHECKING:
-    from vecs.client import Client
+    from vecs.async_client import AsyncClient
 
 
-MetadataValues = Union[str, int, float, bool, List[str]]
-Metadata = Dict[str, MetadataValues]
-Numeric = Union[int, float, complex]
-Record = Tuple[str, Iterable[Numeric], Metadata]
-
-
-class IndexMethod(str, Enum):
+class AsyncCollection:
     """
-    An enum representing the index methods available.
-
-    Attributes:
-        auto (str): Automatically choose the best available index method.
-        ivfflat (str): The ivfflat index method.
-        hnsw (str): The hnsw index method.
-    """
-
-    auto = "auto"
-    ivfflat = "ivfflat"
-    hnsw = "hnsw"
-
-
-class IndexMeasure(str, Enum):
-    """
-    An enum representing the types of distance measures available for indexing.
-
-    Attributes:
-        cosine_distance (str): The cosine distance measure for indexing.
-        l2_distance (str): The Euclidean (L2) distance measure for indexing.
-        max_inner_product (str): The maximum inner product measure for indexing.
-        l1_distance (str): The L1 distance measure for indexing.
-    """
-
-    cosine_distance = "cosine_distance"
-    l2_distance = "l2_distance"
-    max_inner_product = "max_inner_product"
-    l1_distance = "l1_distance"
-
-
-@dataclass
-class IndexArgsIVFFlat:
-    """
-    A class for arguments that can optionally be supplied to the index creation
-    method when building an IVFFlat type index.
-
-    Attributes:
-        n_lists (int): The number of IVF centroids that the index should use
-    """
-
-    n_lists: int
-
-
-@dataclass
-class IndexArgsHNSW:
-    """
-    A class for arguments that can optionally be supplied to the index creation
-    method when building an HNSW type index.
-
-    Ref: https://github.com/pgvector/pgvector#index-options
-
-    Both attributes are Optional in case the user only wants to specify one and
-    leave the other as default
-
-    Attributes:
-        m (int): Maximum number of connections per node per layer (default: 16)
-        ef_construction (int): Size of the dynamic candidate list for
-            constructing the graph (default: 64)
-    """
-
-    m: Optional[int] = 16
-    ef_construction: Optional[int] = 64
-
-
-INDEX_MEASURE_TO_OPS = {
-    # Maps the IndexMeasure enum options to SQL ops strings required by
-    # the pgvector `create index` statement
-    IndexMeasure.cosine_distance: "vector_cosine_ops",
-    IndexMeasure.l2_distance: "vector_l2_ops",
-    IndexMeasure.max_inner_product: "vector_ip_ops",
-    IndexMeasure.l1_distance: "vector_l1_ops",
-}
-
-INDEX_MEASURE_TO_SQLA_ACC = {
-    IndexMeasure.cosine_distance: lambda x: x.cosine_distance,
-    IndexMeasure.l2_distance: lambda x: x.l2_distance,
-    IndexMeasure.max_inner_product: lambda x: x.max_inner_product,
-    IndexMeasure.l1_distance: lambda x: x.l1_distance,
-}
-
-
-class Collection:
-    """
-    The `vecs.Collection` class represents a collection of vectors within a PostgreSQL database with pgvector support.
-    It provides methods to manage (create, delete, fetch, upsert), index, and perform similarity searches on these vector collections.
+    The `vecs.AsyncCollection` class represents a collection of vectors within a PostgreSQL database with pgvector support.
+    It provides async methods to manage (create, delete, fetch, upsert), index, and perform similarity searches on these vector collections.
 
     The collections are stored in separate tables in the database, with each vector associated with an identifier and optional metadata.
 
     Example usage:
 
-        with vecs.create_client(DB_CONNECTION) as vx:
-            collection = vx.create_collection(name="docs", dimension=3)
-            collection.upsert([("id1", [1, 1, 1], {"key": "value"})])
+        async with vecs.create_async_client(DB_CONNECTION) as vx:
+            collection = await vx.get_or_create_collection(name="docs", dimension=3)
+            await collection.upsert([("id1", [1, 1, 1], {"key": "value"})])
             # Further operations on 'collection'
 
     Public Attributes:
@@ -159,20 +66,20 @@ class Collection:
         self,
         name: str,
         dimension: int,
-        client: Client,
+        client: AsyncClient,
         adapter: Optional[Adapter] = None,
     ):
         """
-        Initializes a new instance of the `Collection` class.
+        Initializes a new instance of the `AsyncCollection` class.
 
-        During expected use, developers initialize instances of `Collection` using the
-        `vecs.Client` with `vecs.Client.create_collection(...)` rather than directly.
+        During expected use, developers initialize instances of `AsyncCollection` using the
+        `vecs.AsyncClient` with `vecs.AsyncClient.get_or_create_collection(...)` rather than directly.
 
         Args:
             name (str): The name of the collection.
             dimension (int): The dimension of the vectors in the collection.
-            client (Client): The client to use for interacting with the database.
-            adapter (Adapter): The adapter to use for the collection.
+            client (AsyncClient): The async client to use for interacting with the database.
+            adapter (Adapter, optional): The adapter to use for the collection.
         """
         self.client = client
         self.name = name
@@ -192,9 +99,7 @@ class Collection:
             ]
         )
         if len(reported_dimensions) == 0:
-            raise ArgError(
-                "Dimension must be provided by either `dimension` argument or adapter."
-            )
+            raise ArgError("Either dimension or adapter must provide a dimension.")
         elif len(reported_dimensions) > 1:
             raise MismatchedDimension(
                 "Dimensions reported by `dimension` argument and adapter do not match."
@@ -202,33 +107,32 @@ class Collection:
 
     def __repr__(self):
         """
-        Returns a string representation of the `Collection` instance.
+        Returns a string representation of the `AsyncCollection` instance.
 
         Returns:
-            str: A string representation of the `Collection` instance.
+            str: A string representation of the `AsyncCollection` instance.
         """
-        return f'vecs.Collection(name="{self.name}", dimension={self.dimension})'
+        return f'vecs.AsyncCollection(name="{self.name}", dimension={self.dimension})'
 
-    def __len__(self) -> int:
+    async def __len__(self) -> int:
         """
         Returns the number of vectors in the collection.
 
         Returns:
             int: The number of vectors in the collection.
         """
-        with self.client.Session() as sess:
-            with sess.begin():
+        async with self.client.AsyncSession() as sess:
+            async with sess.begin():
                 stmt = select(func.count()).select_from(self.table)
-                return sess.execute(stmt).scalar() or 0
+                result = await sess.execute(stmt)
+                return result.scalar() or 0
 
-    def _create_if_not_exists(self):
+    async def _create_if_not_exists(self):
         """
-        PRIVATE
-
         Creates a new collection in the database if it doesn't already exist
 
         Returns:
-            Collection: The found or created collection.
+            AsyncCollection: The found or created collection.
         """
         query = text(
             f"""
@@ -247,8 +151,9 @@ class Collection:
             and pc.relname = :name
         """
         ).bindparams(name=self.name)
-        with self.client.Session() as sess:
-            query_result = sess.execute(query).fetchone()
+        async with self.client.AsyncSession() as sess:
+            result = await sess.execute(query)
+            query_result = result.fetchone()
 
             if query_result:
                 _, collection_dimension = query_result
@@ -260,66 +165,71 @@ class Collection:
         )
         if len(reported_dimensions) > 1:
             raise MismatchedDimension(
-                "Dimensions reported by `dimension` argument and existing collection do not match."
+                "Dimensions reported by `dimension` argument and existing collection do not match"
             )
 
         if not collection_dimension:
-            self.table.create(self.client.engine)
+            async with self.client.engine.begin() as conn:
+                await conn.run_sync(self.table.create)
 
         return self
 
-    def _create(self):
+    async def _create(self):
         """
-        PRIVATE
-
-        Creates a new collection in the database. Raises a `vecs.exc.CollectionAlreadyExists`
-        exception if a collection with the specified name already exists.
+        Creates the collection.
 
         Returns:
-            Collection: The newly created collection.
-        """
+            AsyncCollection: The current instance of the AsyncCollection.
 
-        collection_exists = self.__class__._does_collection_exist(
+        Raises:
+            CollectionAlreadyExists: If a collection with the same name already exists.
+        """
+        collection_exists = await self.__class__._does_collection_exist(
             self.client, self.name
         )
         if collection_exists:
             raise CollectionAlreadyExists(
                 "Collection with requested name already exists"
             )
-        self.table.create(self.client.engine)
+        async with self.client.engine.begin() as conn:
+            await conn.run_sync(self.table.create)
 
+        await self._create_gin_index()
+        return self
+
+    async def _create_gin_index(self):
+        """
+        Creates a GIN index on the metadata column for efficient filtering.
+        """
         unique_string = str(uuid.uuid4()).replace("-", "_")[0:7]
-        with self.client.Session() as sess:
-            sess.execute(
+        async with self.client.AsyncSession() as sess:
+            await sess.execute(
                 text(
                     f"""
                     create index ix_meta_{unique_string}
                       on vecs."{self.table.name}"
-                      using gin ( metadata jsonb_path_ops )
+                      using gin (metadata jsonb_path_ops);
                     """
                 )
             )
-        return self
+            await sess.commit()
 
-    def _drop(self):
+    async def _drop(self):
         """
-        PRIVATE
-
-        Deletes the collection from the database. Raises a `vecs.exc.CollectionNotFound`
-        exception if no collection with the specified name exists.
+        Drops the collection from the database.
 
         Returns:
-            Collection: The deleted collection.
+            AsyncCollection: The current instance of the AsyncCollection.
         """
         from sqlalchemy.schema import DropTable
 
-        with self.client.Session() as sess:
-            sess.execute(DropTable(self.table, if_exists=True))
-            sess.commit()
+        async with self.client.AsyncSession() as sess:
+            await sess.execute(DropTable(self.table, if_exists=True))
+            await sess.commit()
 
         return self
 
-    def upsert(
+    async def upsert(
         self, records: Iterable[Tuple[str, Any, Metadata]], skip_adapter: bool = False
     ) -> None:
         """
@@ -347,8 +257,8 @@ class Collection:
                 chunk_size
             )
 
-        with self.client.Session() as sess:
-            with sess.begin():
+        async with self.client.AsyncSession() as sess:
+            async with sess.begin():
                 for chunk in pipeline:
                     stmt = postgresql.insert(self.table).values(chunk)
                     stmt = stmt.on_conflict_do_update(
@@ -357,10 +267,10 @@ class Collection:
                             vec=stmt.excluded.vec, metadata=stmt.excluded.metadata
                         ),
                     )
-                    sess.execute(stmt)
+                    await sess.execute(stmt)
         return None
 
-    def fetch(self, ids: Iterable[str]) -> List[Record]:
+    async def fetch(self, ids: Iterable[str]) -> List[Record]:
         """
         Fetches vectors from the collection by their identifiers.
 
@@ -375,23 +285,24 @@ class Collection:
 
         chunk_size = 12
         records = []
-        with self.client.Session() as sess:
-            with sess.begin():
+        async with self.client.AsyncSession() as sess:
+            async with sess.begin():
                 for id_chunk in flu(ids).chunk(chunk_size):
                     stmt = select(self.table).where(self.table.c.id.in_(id_chunk))
-                    chunk_records = sess.execute(stmt)
+                    result = await sess.execute(stmt)
+                    chunk_records = result.all()
                     records.extend(chunk_records)
         return records
 
-    def delete(
+    async def delete(
         self, ids: Optional[Iterable[str]] = None, filters: Optional[Metadata] = None
     ) -> List[str]:
         """
-        Deletes vectors from the collection by matching filters or ids.
+        Asynchronously deletes vectors from the collection by matching ids or filters.
 
         Args:
             ids (Iterable[str], optional): An iterable of vector identifiers.
-            filters (Optional[Dict], optional): Filters to apply to the search. Defaults to None.
+            filters (Optional[Dict], optional): Metadata filters to match vectors for deletion.
 
         Returns:
             List[str]: A list of the identifiers of the deleted vectors.
@@ -410,10 +321,10 @@ class Collection:
 
         ids = ids or []
         filters = filters or {}
-        del_ids = []
+        del_ids: List[str] = []
 
-        with self.client.Session() as sess:
-            with sess.begin():
+        async with self.client.AsyncSession() as sess:
+            async with sess.begin():
                 if ids:
                     for id_chunk in flu(ids).chunk(12):
                         stmt = (
@@ -421,21 +332,24 @@ class Collection:
                             .where(self.table.c.id.in_(id_chunk))
                             .returning(self.table.c.id)
                         )
-                        del_ids.extend(sess.execute(stmt).scalars() or [])
+                        result = await sess.execute(stmt)
+                        del_ids.extend(result.scalars().all())
 
                 if filters:
                     meta_filter = build_filters(self.table.c.metadata, filters)
                     stmt = (
-                        delete(self.table).where(meta_filter).returning(self.table.c.id)  # type: ignore
+                        delete(self.table)
+                        .where(meta_filter)
+                        .returning(self.table.c.id)  # type: ignore
                     )
-                    result = sess.execute(stmt).scalars()
-                    del_ids.extend(result.fetchall())
+                    result = await sess.execute(stmt)
+                    del_ids.extend([r for r in result.scalars()])
 
         return del_ids
 
-    def __getitem__(self, items):
+    async def __getitem__(self, items: str):
         """
-        Fetches a vector from the collection by its identifier.
+        Asynchronously fetches a vector from the collection by its identifier.
 
         Args:
             items (str): The identifier of the vector.
@@ -450,13 +364,14 @@ class Collection:
         if not isinstance(items, str):
             raise ArgError("items must be a string id")
 
-        row = self.fetch([items])
+        row = await self.fetch([items])
 
-        if row == []:
+        if not row:
             raise KeyError("no item found with requested id")
+
         return row[0]
 
-    def query(
+    async def query(
         self,
         data: Union[Iterable[Numeric], Any],
         limit: int = 10,
@@ -482,8 +397,8 @@ class Collection:
             measure (Union[IndexMeasure, str], optional): The distance measure to use for the search. Defaults to 'cosine_distance'.
             include_value (bool, optional): Whether to include the distance value in the results. Defaults to False.
             include_metadata (bool, optional): Whether to include the metadata in the results. Defaults to False.
+            include_vector (bool, optional): Whether to include the vector in the results. Defaults to False.
             probes (Optional[Int], optional): Number of ivfflat index lists to query. Higher increases accuracy but decreases speed
-            include_vector: (Optional[bool], optional): Wether to include the vector in the result. Defaults to False.
             ef_search (Optional[Int], optional): Size of the dynamic candidate list for HNSW index search. Higher increases accuracy but decreases speed
             skip_adapter (bool, optional): When True, skips any associated adapter and queries using a literal vector provided to *data*
 
@@ -512,7 +427,7 @@ class Collection:
         except ValueError:
             raise ArgError("Invalid index measure")
 
-        if not self.is_indexed_for_measure(imeasure):
+        if not await self.is_indexed_for_measure(imeasure):
             warnings.warn(
                 UserWarning(
                     f"Query does not have a covering index for {imeasure}. See Collection.create_index"
@@ -562,38 +477,32 @@ class Collection:
         stmt = stmt.order_by(distance_clause)
         stmt = stmt.limit(limit)
 
-        with self.client.Session() as sess:
-            with sess.begin():
+        async with self.client.AsyncSession() as sess:
+            async with sess.begin():
                 # index ignored if greater than n_lists
-                sess.execute(
-                    text("set local ivfflat.probes = :probes").bindparams(probes=probes)
-                )
+                await sess.execute(text(f"set local ivfflat.probes = {int(probes)}"))
                 if self.client._supports_hnsw():
-                    sess.execute(
-                        text("set local hnsw.ef_search = :ef_search").bindparams(
-                            ef_search=ef_search
-                        )
+                    await sess.execute(
+                        text(f"set local hnsw.ef_search = {int(ef_search)}")
                     )
+                result = await sess.execute(stmt)
                 if len(cols) == 1:
-                    return [str(x) for x in sess.scalars(stmt).fetchall()]
-                return sess.execute(stmt).fetchall() or []
+                    return [str(x) for x in result.scalars().all()]
+                return result.fetchall()
 
     @classmethod
-    def _list_collections(cls, client: "Client") -> List["Collection"]:
+    async def _list_collections(cls, client: AsyncClient) -> List[AsyncCollection]:
         """
-        PRIVATE
-
-        Retrieves all collections from the database.
+        Lists all collections in the database.
 
         Args:
-            client (Client): The database client.
+            client (AsyncClient): The async client to use for the database connection.
 
         Returns:
-            List[Collection]: A list of all existing collections.
+            List[AsyncCollection]: A list of all collections.
         """
-
         query = text(
-            """
+            f"""
         select
             relname as table_name,
             atttypmod as embedding_dim
@@ -609,48 +518,40 @@ class Collection:
         """
         )
         xc = []
-        with client.Session() as sess:
-            for name, dimension in sess.execute(query):
+        async with client.AsyncSession() as sess:
+            result = await sess.execute(query)
+            for name, dimension in result.all():
                 existing_collection = cls(name, dimension, client)
                 xc.append(existing_collection)
         return xc
 
     @classmethod
-    def _does_collection_exist(cls, client: "Client", name: str) -> bool:
+    async def _does_collection_exist(cls, client: "AsyncClient", name: str) -> bool:
         """
         PRIVATE
 
         Checks if a collection with a given name exists within the database
 
         Args:
-            client (Client): The database client.
+            client (AsyncClient): The database client.
             name (str): The name of the collection
 
         Returns:
             Exists: Whether the collection exists or not
         """
-
         try:
-            client.get_collection(name)
+            await client.get_collection(name)
             return True
         except CollectionNotFound:
             return False
 
-    @property
-    def index(self) -> Optional[str]:
+    async def index(self) -> Optional[str]:
         """
-        PRIVATE
-
-        Note:
-            The `index` property is private and expected to undergo refactoring.
-            Do not rely on it's output.
-
-        Retrieves the SQL name of the collection's vector index, if it exists.
+        Returns the name of the index for the collection, if one exists.
 
         Returns:
             Optional[str]: The name of the index, or None if no index exists.
         """
-
         if self._index is None:
             query = text(
                 """
@@ -669,14 +570,15 @@ class Collection:
                 and pt.relname = :table_name
             """
             )
-            with self.client.Session() as sess:
-                ix_name = sess.execute(query, {"table_name": self.name}).scalar()
+            async with self.client.AsyncSession() as sess:
+                result = await sess.execute(query, {"table_name": self.name})
+                ix_name = result.scalar()
             self._index = ix_name
         return self._index
 
-    def is_indexed_for_measure(self, measure: IndexMeasure):
+    async def is_indexed_for_measure(self, measure: IndexMeasure):
         """
-        Checks if the collection is indexed for a specific measure.
+        Checks if the collection is indexed for the given measure.
 
         Args:
             measure (IndexMeasure): The measure to check for.
@@ -684,29 +586,24 @@ class Collection:
         Returns:
             bool: True if the collection is indexed for the measure, False otherwise.
         """
-
-        index_name = self.index
+        index_name = await self.index()
         if index_name is None:
             return False
-
         ops = INDEX_MEASURE_TO_OPS.get(measure)
         if ops is None:
             return False
 
-        if ops in index_name:
-            return True
+        return ops in index_name
 
-        return False
-
-    def create_index(
+    async def create_index(
         self,
         measure: IndexMeasure = IndexMeasure.cosine_distance,
         method: IndexMethod = IndexMethod.auto,
         index_arguments: Optional[Union[IndexArgsIVFFlat, IndexArgsHNSW]] = None,
-        replace=True,
+        replace: bool = True,
     ) -> None:
         """
-        Creates an index for the collection.
+        Asynchronously creates an index for the collection.
 
         Note:
             When `vecs` creates an index on a pgvector column in PostgreSQL, it uses a multi-step
@@ -734,22 +631,13 @@ class Collection:
             replace (bool, optional): Whether to replace the existing index. Defaults to True.
 
         Raises:
-            ArgError: If an invalid index method is used, or if *replace* is False and an index already exists.
+            ArgError:
         """
-
-        if method not in (IndexMethod.ivfflat, IndexMethod.hnsw, IndexMethod.auto):
-            raise ArgError("invalid index method")
-
         if index_arguments:
-            # Disallow case where user submits index arguments but uses the
-            # IndexMethod.auto index (index build arguments should only be
-            # used with a specific index)
             if method == IndexMethod.auto:
                 raise ArgError(
                     "Index build parameters are not allowed when using the IndexMethod.auto index."
                 )
-            # Disallow case where user specifies one index type but submits
-            # index build arguments for the other index type
             if (
                 isinstance(index_arguments, IndexArgsHNSW)
                 and method != IndexMethod.hnsw
@@ -761,6 +649,7 @@ class Collection:
                     f"{index_arguments.__class__.__name__} build parameters were supplied but {method} index was specified."
                 )
 
+        # Auto-detect method if needed
         if method == IndexMethod.auto:
             if self.client._supports_hnsw():
                 method = IndexMethod.hnsw
@@ -778,217 +667,57 @@ class Collection:
 
         unique_string = str(uuid.uuid4()).replace("-", "_")[0:7]
 
-        with self.client.Session() as sess:
-            with sess.begin():
-                if self.index is not None:
+        async with self.client.AsyncSession() as sess:
+            async with sess.begin():
+                current_index = await self.index()
+                if current_index is not None:
                     if replace:
-                        sess.execute(text(f'drop index vecs."{self.index}";'))
+                        await sess.execute(
+                            text(f'DROP INDEX IF EXISTS vecs."{current_index}";')
+                        )
                         self._index = None
                     else:
                         raise ArgError("replace is set to False but an index exists")
 
                 if method == IndexMethod.ivfflat:
                     if not index_arguments:
-                        n_records: int = sess.execute(func.count(self.table.c.id)).scalar()  # type: ignore
-
+                        result = await sess.execute(
+                            select(func.count()).select_from(self.table)
+                        )
+                        n_records: int = result.scalar_one()
                         n_lists = (
                             int(max(n_records / 1000, 30))
                             if n_records < 1_000_000
                             else int(math.sqrt(n_records))
                         )
                     else:
-                        # The following mypy error is ignored because mypy
-                        # complains that `index_arguments` is typed as a union
-                        # of IndexArgsIVFFlat and IndexArgsHNSW types,
-                        # which both don't necessarily contain the `n_lists`
-                        # parameter, however we have validated that the
-                        # correct type is being used above.
                         n_lists = index_arguments.n_lists  # type: ignore
 
-                    sess.execute(
+                    await sess.execute(
                         text(
                             f"""
-                            create index ix_{ops}_ivfflat_nl{n_lists}_{unique_string}
-                              on vecs."{self.table.name}"
-                              using ivfflat (vec {ops}) with (lists={n_lists})
+                            CREATE INDEX ix_{ops}_ivfflat_nl{n_lists}_{unique_string}
+                            ON vecs."{self.table.name}"
+                            USING ivfflat (vec {ops}) WITH (lists = {n_lists})
                             """
                         )
                     )
 
-                if method == IndexMethod.hnsw:
+                elif method == IndexMethod.hnsw:
                     if not index_arguments:
                         index_arguments = IndexArgsHNSW()
 
-                    # See above for explanation of why the following lines
-                    # are ignored
                     m = index_arguments.m  # type: ignore
                     ef_construction = index_arguments.ef_construction  # type: ignore
 
-                    sess.execute(
+                    await sess.execute(
                         text(
                             f"""
-                            create index ix_{ops}_hnsw_m{m}_efc{ef_construction}_{unique_string}
-                              on vecs."{self.table.name}"
-                              using hnsw (vec {ops}) WITH (m={m}, ef_construction={ef_construction});
+                            CREATE INDEX ix_{ops}_hnsw_m{m}_efc{ef_construction}_{unique_string}
+                            ON vecs."{self.table.name}"
+                            USING hnsw (vec {ops}) WITH (m = {m}, ef_construction = {ef_construction})
                             """
                         )
                     )
 
         return None
-
-
-def build_filters(json_col: Column, filters: Dict):
-    """
-    PRIVATE
-
-    Builds filters for SQL query based on provided dictionary.
-
-    Args:
-        json_col (Column): The column in the database table.
-        filters (Dict): The dictionary specifying filter conditions.
-
-    Raises:
-        FilterError: If filter conditions are not correctly formatted.
-
-    Returns:
-        The filter clause for the SQL query.
-    """
-
-    if not isinstance(filters, dict):
-        raise FilterError("filters must be a dict")
-
-    if len(filters) > 1:
-        raise FilterError("max 1 entry per filter")
-
-    for key, value in filters.items():
-        if not isinstance(key, str):
-            raise FilterError("*filters* keys must be strings")
-
-        if key in ("$and", "$or"):
-            if not isinstance(value, list):
-                raise FilterError(
-                    "$and/$or filters must have associated list of conditions"
-                )
-
-            if key == "$and":
-                return and_(*[build_filters(json_col, subcond) for subcond in value])
-
-            if key == "$or":
-                return or_(*[build_filters(json_col, subcond) for subcond in value])
-
-            raise Unreachable()
-
-        if isinstance(value, dict):
-            if len(value) > 1:
-                raise FilterError("only one operator permitted")
-            for operator, clause in value.items():
-                if operator not in (
-                    "$eq",
-                    "$ne",
-                    "$lt",
-                    "$lte",
-                    "$gt",
-                    "$gte",
-                    "$in",
-                    "$contains",
-                ):
-                    raise FilterError("unknown operator")
-
-                # equality of singular values can take advantage of the metadata index
-                # using containment operator. Containment can not be used to test equality
-                # of lists or dicts so we restrict to single values with a __len__ check.
-                if operator == "$eq" and not hasattr(clause, "__len__"):
-                    contains_value = cast({key: clause}, postgresql.JSONB)
-                    return json_col.op("@>")(contains_value)
-
-                if operator == "$in":
-                    if not isinstance(clause, list):
-                        raise FilterError("argument to $in filter must be a list")
-
-                    for elem in clause:
-                        if not isinstance(elem, (int, str, float)):
-                            raise FilterError(
-                                "argument to $in filter must be a list of scalars"
-                            )
-
-                    # cast the array of scalars to a postgres array of jsonb so we can
-                    # directly compare json types in the query
-                    contains_value = [cast(elem, postgresql.JSONB) for elem in clause]
-                    return json_col.op("->")(key).in_(contains_value)
-
-                matches_value = cast(clause, postgresql.JSONB)
-
-                # @> in Postgres is heavily overloaded.
-                # By default, it will return True for
-                #
-                # scalar in array
-                #   '[1, 2, 3]'::jsonb @> '1'::jsonb -- true#
-                # equality:
-                #   '1'::jsonb @> '1'::jsonb -- true
-                # key value pair in object
-                #   '{"a": 1, "b": 2}'::jsonb @> '{"a": 1}'::jsonb -- true
-                #
-                # At this time we only want to allow "scalar in array" so
-                # we assert that the clause is a scalar and the target metadata
-                # is an array
-                if operator == "$contains":
-                    if not isinstance(clause, (int, str, float)):
-                        raise FilterError(
-                            "argument to $contains filter must be a scalar"
-                        )
-
-                    return and_(
-                        json_col.op("->")(key).contains(matches_value),
-                        func.jsonb_typeof(json_col.op("->")(key)) == "array",
-                    )
-
-                # handles non-singular values
-                if operator == "$eq":
-                    return json_col.op("->")(key) == matches_value
-
-                elif operator == "$ne":
-                    return json_col.op("->")(key) != matches_value
-
-                elif operator == "$lt":
-                    return json_col.op("->")(key) < matches_value
-
-                elif operator == "$lte":
-                    return json_col.op("->")(key) <= matches_value
-
-                elif operator == "$gt":
-                    return json_col.op("->")(key) > matches_value
-
-                elif operator == "$gte":
-                    return json_col.op("->")(key) >= matches_value
-
-                else:
-                    raise Unreachable()
-
-
-def build_table(name: str, meta: MetaData, dimension: int) -> Table:
-    """
-    PRIVATE
-
-    Builds an SQLAlchemy model underpinning a `vecs.Collection`.
-
-    Args:
-        name (str): The name of the table.
-        meta (MetaData): MetaData instance associated with the SQL database.
-        dimension: The dimension of the vectors in the collection.
-
-    Returns:
-        Table: The constructed SQL table.
-    """
-    return Table(
-        name,
-        meta,
-        Column("id", String, primary_key=True),
-        Column("vec", Vector(dimension), nullable=False),
-        Column(
-            "metadata",
-            postgresql.JSONB,
-            server_default=text("'{}'::jsonb"),
-            nullable=False,
-        ),
-        extend_existing=True,
-    )
