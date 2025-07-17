@@ -8,7 +8,6 @@ from typing import Generator
 
 import pytest
 import pytest_asyncio
-
 from parse import parse
 from sqlalchemy import create_engine, text
 

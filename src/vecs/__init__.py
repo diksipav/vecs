@@ -1,4 +1,6 @@
 from vecs import exc
+from vecs.async_client import AsyncClient
+from vecs.async_collection import AsyncCollection
 from vecs.client import Client
 from vecs.collection import (
     Collection,
@@ -7,8 +9,6 @@ from vecs.collection import (
     IndexMeasure,
     IndexMethod,
 )
-from vecs.async_client import AsyncClient
-from vecs.async_collection import AsyncCollection
 
 __project__ = "vecs"
 __version__ = "0.4.5"
